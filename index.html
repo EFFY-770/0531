@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <title>教育科技文字掉落遊戲（單手版）</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: 'Microsoft JhengHei', sans-serif;
+      background-color: #000;
+      color: #fff;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      gap: 20px;
+      padding: 20px;
+    }
+    #info {
+      width: 180px;
+    }
+    #info h3 {
+      margin-bottom: 0.5em;
+    }
+    #canvas-container {
+      position: relative;
+    }
+    canvas {
+      display: block;
+      border: 2px solid #fff;
+    }
+    #overlay {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      color: #fff;
+      font-size: 18px;
+    }
+    #right {
+      width: 200px;
+    }
+    button {
+      margin-top: 10px;
+      font-size: 16px;
+      padding: 4px 10px;
+      cursor: pointer;
+    }
+  </style>
+  <!-- 載入 p5.js 及 ml5.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.11.1/p5.min.js"></script>
+  <script src="https://unpkg.com/ml5@0.12.2/dist/ml5.min.js"></script>
+</head>
+<body>
+  <!-- 左側：學生資訊 + 按鈕 -->
+  <div id="info">
+    <h3>教科一B</h3>
+    <p>413730770</p>
+    <p>李蕙芯</p>
+    <button id="startButton">開始遊戲</button>
+    <button id="restartButton" style="display:none;">重新開始</button>
+  </div>
+
+  <!-- 中間：畫布容器與分數、時間覆蓋層 -->
+  <div id="canvas-container">
+    <div id="overlay">
+      <div id="scoreBoard">分數: 0</div>
+      <div id="timeBoard">時間: 30 秒</div>
+    </div>
+    <!-- p5.js 會在這裡動態建立 canvas -->
+  </div>
+
+  <!-- 右側：遊戲說明 -->
+  <div id="right">
+    <h3>🎮 遊戲說明</h3>
+    <ul>
+      <li>使用「單手食指」點擊下落的中文字</li>
+      <li>每點一個文字即可 +10 分</li>
+      <li>限時 30 秒，看看能得幾分！</li>
+    </ul>
+  </div>
+
+  <!-- 以下是 JavaScript 程式 -->
+  <script>
+    // 全域變數
+    let video;
+    let handpose;
+    let predictions = [];
+
+    let grid = [];
+    let cols, rows;
+    let size = 30;
+    let eduWords = ["教", "育", "科", "技"];
+
+    let score = 0;
+    let gameDuration = 30; // 遊戲秒數
+    let startTime;
+    let gameState = "start"; // start, playing, gameover
+
+    // 從 HTML 拿到元素
+    const scoreBoard = document.getElementById('scoreBoard');
+    const timeBoard = document.getElementById('timeBoard');
+    const startButton = document.getElementById('startButton');
+    const restartButton = document.getElementById('restartButton');
+
+    function setup() {
+      // 建立 640x480 的畫布，並放到 #canvas-container
+      const canvas = createCanvas(640, 480);
+      canvas.parent('canvas-container');
+      textFont('Microsoft JhengHei');
+
+      // 建立攝影機輸入，但隱藏原生 <video> 元素
+      video = createCapture(VIDEO);
+      video.size(width, height);
+      video.hide();
+
+      // 初始化 ml5 handpose 模型
+      handpose = ml5.handpose(video, () => {
+        console.log("Handpose 模型已載入");
+      });
+      handpose.on("predict", (results) => {
+        predictions = results;
+      });
+
+      // 計算網格行列
+      cols = floor(width / size);
+      rows = floor(height / size);
+      for (let i = 0; i < cols; i++) {
+        grid[i] = [];
+        for (let j = 0; j < rows; j++) {
+          grid[i][j] = null;
+        }
+      }
+
+      noLoop(); // 預設停止 draw()
+
+      // 綁定按鈕事件
+      startButton.onclick = () => {
+        startGame();
+      };
+      restartButton.onclick = () => {
+        resetGame();
+        startGame();
+      };
+    }
+
+    function draw() {
+      background(0);
+      if (gameState === "playing") {
+        playGame();
+      }
+    }
+
+    function playGame() {
+      // 先把攝影機畫面鏡像顯示
+      push();
+      translate(width, 0);
+      scale(-1, 1);
+      image(video, 0, 0, width, height);
+      pop();
+
+      // 計算剩餘時間
+      let elapsed = floor((millis() - startTime) / 1000);
+      let timeLeft = max(0, gameDuration - elapsed);
+      timeBoard.textContent = `時間: ${timeLeft} 秒`;
+
+      // 時間到就結束遊戲
+      if (timeLeft <= 0) {
+        gameOver();
+        return;
+      }
+
+      // 每 40 幀新增一個文字 (速度較慢)
+      if (frameCount % 40 === 0) {
+        addWord(floor(random(cols)), 0);
+      }
+
+      // 單手食指偵測：如果碰到格子裡有文字，就消除並加分
+      if (predictions.length > 0) {
+        // 僅取第一隻手的 indexFinger[3]
+        let tip = predictions[0].annotations.indexFinger[3];
+        let x = width - tip[0]; // 鏡像後的 x 座標
+        let y = tip[1];        // y 座標
+
+        // 畫出紅點指示食指
+        fill(255, 0, 0);
+        noStroke();
+        ellipse(x, y, 20);
+
+        // 計算落在哪個格子
+        let gridX = floor(x / size);
+        let gridY = floor(y / size);
+
+        // 如果該格有文字，就消除並加 10 分
+        if (
+          gridX >= 0 &&
+          gridX < cols &&
+          gridY >= 0 &&
+          gridY < rows &&
+          grid[gridX][gridY] !== null
+        ) {
+          grid[gridX][gridY] = null;
+          score += 10;
+          scoreBoard.textContent = `分數: ${score}`;
+        }
+      }
+
+      // 處理文字下落
+      let nextGrid = [];
+      for (let i = 0; i < cols; i++) {
+        nextGrid[i] = [];
+        for (let j = 0; j < rows; j++) {
+          nextGrid[i][j] = null;
+        }
+      }
+
+      for (let i = 0; i < cols; i++) {
+        for (let j = rows - 1; j >= 0; j--) {
+          if (grid[i][j]) {
+            if (j + 1 < rows && grid[i][j + 1] === null) {
+              nextGrid[i][j + 1] = grid[i][j];
+            } else {
+              nextGrid[i][j] = grid[i][j];
+            }
+          }
+        }
+      }
+      grid = nextGrid;
+
+      // 繪製所有文字
+      textAlign(CENTER, CENTER);
+      fill(255);
+      textSize(size);
+      for (let i = 0; i < cols; i++) {
+        for (let j = 0; j < rows; j++) {
+          if (grid[i][j]) {
+            text(grid[i][j], i * size + size / 2, j * size + size / 2);
+          }
+        }
+      }
+    }
+
+    // 在 (x, y) 格子隨機放一個文字
+    function addWord(x, y) {
+      if (grid[x][y] === null) {
+        grid[x][y] = random(eduWords);
+      }
+    }
+
+    function startGame() {
+      gameState = "playing";
+      score = 0;
+      scoreBoard.textContent = "分數: 0";
+      startTime = millis();
+      loop(); // 開始 draw()
+      startButton.style.display = "none";
+      restartButton.style.display = "none";
+    }
+
+    function gameOver() {
+      gameState = "gameover";
+      noLoop(); // 停止 draw()
+      restartButton.style.display = "inline-block";
+      alert(`遊戲結束！\n你的分數：${score}`);
+    }
+
+    function resetGame() {
+      // 清空網格
+      for (let i = 0; i < cols; i++) {
+        for (let j = 0; j < rows; j++) {
+          grid[i][j] = null;
+        }
+      }
+      score = 0;
+      scoreBoard.textContent = "分數: 0";
+      timeBoard.textContent = `時間: ${gameDuration} 秒`;
+      startButton.style.display = "inline-block";
+      restartButton.style.display = "none";
+    }
+  </script>
+</body>
+</html>
